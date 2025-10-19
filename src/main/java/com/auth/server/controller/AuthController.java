@@ -7,6 +7,9 @@ import com.auth.server.util.SignInRequest;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.core.Authentication;
+import org.springframework.security.core.context.SecurityContextHolder;
+import org.springframework.security.core.userdetails.UserDetails;
 import org.springframework.web.bind.annotation.*;
 
 import jakarta.servlet.http.HttpServletRequest;
@@ -30,17 +33,18 @@ public class AuthController {
             );
         } catch (Exception ex) {
             log.error("Authentication failed for user: {}", signInRequest.email(), ex);
-            return ResponseEntity.status(401).build();
+            return ResponseEntity.status(401).body(
+                    new JwtResponse(null, signInRequest.email(), "Authentication failed: " + ex.getMessage())
+            );
         }
     }
-
 
     @PostMapping("/oauth2/success")
     public ResponseEntity<Map<String, Object>> handleOAuth2Success(HttpServletRequest request) {
         try {
             User user = (User) request.getAttribute("user");
             if (user == null) {
-                return ResponseEntity.badRequest().build();
+                return ResponseEntity.badRequest().body(Map.of("error", "User not found in request"));
             }
 
             String jwt = userService.generateJwtToken(user);
@@ -53,21 +57,40 @@ public class AuthController {
                             "provider", user.getProvider(),
                             "imageUrl", user.getImageUrl(),
                             "emailVerified", user.isEmailVerified()
-                    )
+                    ),
+                    "message", "OAuth2 authentication successful"
             ));
         } catch (Exception ex) {
             log.error("OAuth2 success handling failed", ex);
-            return ResponseEntity.status(500).build();
+            return ResponseEntity.status(500).body(Map.of("error", "OAuth2 authentication failed"));
         }
     }
 
     @GetMapping("/me")
-    public ResponseEntity<Map<String, Object>> getCurrentUser(HttpServletRequest request) {
+    public ResponseEntity<Map<String, Object>> getCurrentUser() {
         try {
-            User user = (User) request.getAttribute("user");
-            if (user == null) {
-                return ResponseEntity.status(401).build();
+            Authentication authentication = SecurityContextHolder.getContext().getAuthentication();
+
+            if (authentication == null || !authentication.isAuthenticated() ||
+                    authentication.getPrincipal().equals("anonymousUser")) {
+                return ResponseEntity.status(401).body(Map.of("error", "Not authenticated"));
             }
+
+            // Get user details from SecurityContext
+            Object principal = authentication.getPrincipal();
+            String username;
+
+            if (principal instanceof UserDetails) {
+                username = ((UserDetails) principal).getUsername();
+            } else if (principal instanceof String) {
+                username = (String) principal;
+            } else {
+                return ResponseEntity.status(401).body(Map.of("error", "Invalid authentication"));
+            }
+
+            // Load user from database to get full details
+            User user = userService.findByEmail(username)
+                    .orElseThrow(() -> new RuntimeException("User not found: " + username));
 
             return ResponseEntity.ok(Map.of(
                     "id", user.getUid(),
@@ -81,15 +104,18 @@ public class AuthController {
             ));
         } catch (Exception ex) {
             log.error("Failed to get current user", ex);
-            return ResponseEntity.status(500).build();
+            return ResponseEntity.status(500).body(Map.of("error", "Failed to get user details"));
         }
     }
 
     @PostMapping("/logout")
-    public ResponseEntity<String> logoutUser() {
-        // In stateless JWT architecture, token validation happens on the client side
-        // Server can't invalidate tokens, so this endpoint is informational
-        return ResponseEntity.ok("Logout successful. Please remove token from client storage.");
+    public ResponseEntity<Map<String, String>> logoutUser() {
+        // Clear the security context
+        SecurityContextHolder.clearContext();
+
+        return ResponseEntity.ok(Map.of(
+                "message", "Logout successful. Please remove token from client storage."
+        ));
     }
 
     @GetMapping("/providers")
@@ -113,5 +139,10 @@ public class AuthController {
                         )
                 )
         ));
+    }
+
+    @GetMapping("/health")
+    public ResponseEntity<Map<String, String>> healthCheck() {
+        return ResponseEntity.ok(Map.of("status", "OK", "service", "Auth Service"));
     }
 }

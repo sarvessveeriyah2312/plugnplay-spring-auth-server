@@ -24,7 +24,7 @@ import java.util.List;
 @RequiredArgsConstructor
 public class SecurityConfig {
 
-    private final JwtAuthFilter jwtAuthFilter;
+    private final JwtAuthenticationFilter jwtAuthenticationFilter; // ✅ Use only this filter
     private final JwtAuthEntryPoint jwtAuthEntryPoint;
     private final CustomOAuth2UserService customOAuth2UserService;
 
@@ -35,25 +35,32 @@ public class SecurityConfig {
                 .cors(cors -> cors.configurationSource(corsConfigurationSource()))
                 .csrf(csrf -> csrf.disable())
 
-                // === Stateless JWT Sessions ===
+                // === Stateless (no sessions, tokens only) ===
                 .sessionManagement(session -> session.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
 
                 // === Authorization Rules ===
                 .authorizeHttpRequests(auth -> auth
-                        // Public routes
-                        .requestMatchers("/api/auth/**", "/h2-console/**", "/login/**", "/oauth2/**", "/error").permitAll()
+                        // Public endpoints
+                        .requestMatchers(
+                                "/api/auth/**",
+                                "/.well-known/**",
+                                "/h2-console/**",
+                                "/login/**",
+                                "/oauth2/**",
+                                "/error"
+                        ).permitAll()
 
-                        // Admin routes (ROLE_ADMIN required)
+                        // Admin endpoints
                         .requestMatchers("/api/admin/**").hasRole("ADMIN")
 
-                        // User routes (ROLE_USER or ADMIN)
+                        // User endpoints
                         .requestMatchers("/api/user/**").hasAnyRole("USER", "ADMIN")
 
-                        // All others need authentication
+                        // Everything else requires authentication
                         .anyRequest().authenticated()
                 )
 
-                // === OAuth2 Login Configuration ===
+                // === OAuth2 Login ===
                 .oauth2Login(oauth2 -> oauth2
                         .loginPage("/oauth2/authorization/google")
                         .defaultSuccessUrl("/api/auth/oauth2/success", true)
@@ -65,7 +72,7 @@ public class SecurityConfig {
                 .exceptionHandling(ex -> ex.authenticationEntryPoint(jwtAuthEntryPoint))
 
                 // === JWT Filter ===
-                .addFilterBefore(jwtAuthFilter, UsernamePasswordAuthenticationFilter.class)
+                .addFilterBefore(jwtAuthenticationFilter, UsernamePasswordAuthenticationFilter.class)
 
                 // === H2 Console Support ===
                 .headers(headers -> headers.frameOptions(frame -> frame.sameOrigin()));
@@ -78,8 +85,10 @@ public class SecurityConfig {
         CorsConfiguration config = new CorsConfiguration();
         config.setAllowedOrigins(List.of("http://localhost:3000", "http://localhost:4200"));
         config.setAllowedMethods(List.of("GET", "POST", "PUT", "DELETE", "OPTIONS"));
-        config.setAllowedHeaders(List.of("*"));
+        config.setAllowedHeaders(List.of("Authorization", "Content-Type", "X-Requested-With"));
+        config.setExposedHeaders(List.of("Authorization"));
         config.setAllowCredentials(true);
+        config.setMaxAge(3600L);
 
         UrlBasedCorsConfigurationSource source = new UrlBasedCorsConfigurationSource();
         source.registerCorsConfiguration("/**", config);
@@ -88,7 +97,6 @@ public class SecurityConfig {
 
     @Bean
     public PasswordEncoder passwordEncoder() {
-        // You can adjust strength (default = 10)
         return new BCryptPasswordEncoder();
     }
 

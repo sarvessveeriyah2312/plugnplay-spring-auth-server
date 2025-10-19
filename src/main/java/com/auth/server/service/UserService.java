@@ -1,14 +1,16 @@
 package com.auth.server.service;
 
-import com.auth.server.config.JwtUtilsConfig;
 import com.auth.server.model.User;
 import com.auth.server.repository.UserRepository;
+import com.auth.server.util.JwtUtils;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.security.authentication.AuthenticationManager;
 import org.springframework.security.config.annotation.authentication.configuration.AuthenticationConfiguration;
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
 import org.springframework.security.core.Authentication;
+import org.springframework.security.core.GrantedAuthority;
+import org.springframework.security.core.authority.SimpleGrantedAuthority;
 import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.security.core.userdetails.UserDetails;
 import org.springframework.security.oauth2.core.user.OAuth2User;
@@ -17,6 +19,7 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.util.Map;
 import java.util.Optional;
+import java.util.stream.Collectors;
 
 @Slf4j
 @Service
@@ -26,7 +29,11 @@ public class UserService {
 
     private final UserRepository userRepository;
     private final AuthenticationConfiguration authenticationConfiguration;
-    private final JwtUtilsConfig jwtUtilsConfig;
+    private final JwtUtils jwtUtils; // ✅ Changed to JwtUtils
+
+    // =====================================================
+    // USER RETRIEVAL
+    // =====================================================
 
     public Optional<User> findByEmail(String email) {
         return userRepository.findByEmail(email);
@@ -35,6 +42,10 @@ public class UserService {
     public Optional<User> findByProviderAndProviderId(String provider, String providerId) {
         return userRepository.findByProviderAndProviderId(provider, providerId);
     }
+
+    // =====================================================
+    // OAUTH USER CREATION
+    // =====================================================
 
     public User findOrCreateUser(OAuth2User oauth2User, String provider) {
         Map<String, Object> attributes = oauth2User.getAttributes();
@@ -58,6 +69,10 @@ public class UserService {
                 });
     }
 
+    // =====================================================
+    // LOCAL AUTHENTICATION (EMAIL + PASSWORD)
+    // =====================================================
+
     public String authenticate(String email, String password) {
         try {
             AuthenticationManager authenticationManager = authenticationConfiguration.getAuthenticationManager();
@@ -65,33 +80,44 @@ public class UserService {
                     new UsernamePasswordAuthenticationToken(email, password)
             );
             SecurityContextHolder.getContext().setAuthentication(authentication);
+
             UserDetails userDetails = (UserDetails) authentication.getPrincipal();
-            return jwtUtilsConfig.generateToken(userDetails);
+
+            // ✅ Use the method that includes actual roles from UserDetails
+            return jwtUtils.generateToken(userDetails.getUsername(), userDetails.getAuthorities());
+
         } catch (Exception ex) {
-            throw new RuntimeException("Authentication failed: " + ex.getMessage());
+            log.error("Authentication failed for {}: {}", email, ex.getMessage());
+            throw new RuntimeException("Authentication failed: " + ex.getMessage(), ex);
         }
     }
 
+    // =====================================================
+    // TOKEN GENERATION FOR OAUTH USERS
+    // =====================================================
 
     public String generateJwtToken(User user) {
-        UserDetails userDetails = org.springframework.security.core.userdetails.User
-                .withUsername(user.getEmail())
-                .password("") // OAuth users don't have passwords
-                .roles("USER")
-                .build();
+        // ✅ Load the full user with roles from database
+        User fullUser = userRepository.findByEmail(user.getEmail())
+                .orElseThrow(() -> new RuntimeException("User not found: " + user.getEmail()));
 
-        return jwtUtilsConfig.generateToken(userDetails, Map.of(
-                "userId", user.getUid(),
-                "fullName", user.getFullName(),
-                "provider", user.getProvider(),
-                "imageUrl", user.getImageUrl()
-        ));
+        // Convert User roles to GrantedAuthority and generate token with actual roles
+        var authorities = fullUser.getAuthorities().stream()
+                .map(role -> new SimpleGrantedAuthority(role.getAuthority()))
+                .collect(Collectors.toList());
+
+        return jwtUtils.generateToken(fullUser.getEmail(), authorities);
     }
+
+    // =====================================================
+    // ATTRIBUTE EXTRACTION HELPERS
+    // =====================================================
 
     private String extractEmail(Map<String, Object> attributes, String provider) {
         return switch (provider.toLowerCase()) {
             case "google" -> (String) attributes.get("email");
-            case "github" -> (String) attributes.getOrDefault("email", attributes.get("login") + "@users.noreply.github.com");
+            case "github" -> (String) attributes.getOrDefault("email",
+                    attributes.get("login") + "@users.noreply.github.com");
             case "microsoft" -> (String) attributes.get("mail");
             default -> (String) attributes.get("email");
         };
@@ -100,7 +126,7 @@ public class UserService {
     private String extractProviderId(Map<String, Object> attributes, String provider) {
         return switch (provider.toLowerCase()) {
             case "google" -> (String) attributes.get("sub");
-            case "github" -> (String) attributes.get("id").toString();
+            case "github" -> attributes.get("id").toString();
             case "microsoft" -> (String) attributes.get("oid");
             default -> (String) attributes.get("id");
         };
@@ -109,7 +135,7 @@ public class UserService {
     private String extractFullName(Map<String, Object> attributes, String provider) {
         return switch (provider.toLowerCase()) {
             case "google" -> (String) attributes.get("name");
-            case "github" -> (String) attributes.getOrDefault("name", (String) attributes.get("login"));
+            case "github" -> (String) attributes.getOrDefault("name", attributes.get("login"));
             case "microsoft" -> (String) attributes.get("displayName");
             default -> (String) attributes.get("name");
         };
@@ -127,9 +153,22 @@ public class UserService {
     private boolean isEmailVerified(Map<String, Object> attributes, String provider) {
         return switch (provider.toLowerCase()) {
             case "google" -> Boolean.TRUE.equals(attributes.get("email_verified"));
-            case "github" -> false; // GitHub doesn't provide email verification for public email
-            case "microsoft" -> true; // Microsoft email is typically verified
+            case "github" -> false;
+            case "microsoft" -> true;
             default -> false;
         };
+    }
+    /**
+     * Generate JWT token with roles from User entity
+     */
+    private String generateTokenWithRoles(User user) {
+        // Extract roles from User entity
+        var roles = user.getAuthorities().stream()
+                .map(GrantedAuthority::getAuthority)
+                .collect(Collectors.toList());
+
+        log.debug("Generating token for user: {} with roles: {}", user.getEmail(), roles);
+
+        return jwtUtils.generateToken(user.getEmail(), roles);
     }
 }
